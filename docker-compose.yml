@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile  # .Dockerfile emas, Dockerfile bo‘lishi kerak
+    container_name: telegram-bot
+    restart: unless-stopped
+    volumes:
+      - ./bot.py:/app/bot.py  # Kodni tashqaridan yangilash uchun
+    environment:
+      - PYTHONUNBUFFERED=1  # Loglarni real vaqtda ko‘rish uchun
