@@ -2,86 +2,121 @@ import telegram
 from telegram.ext import Application, MessageHandler, filters
 import asyncio
 import re
-from datetime import datetime, timedelta
+import os
+from typing import List
+import logging
+from datetime import datetime, time
+import json
 import pytz
 
-TOKEN = '7844550136:AAHlX-BKpAo_dT2n7asdytwoNn4jDNfpbmM'
-CHANNEL_ID = '-1002571997790'
-ALLOWED_USER_ID = 5773326948  
+# Logging sozlamalari
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-message_list = []
-is_sending = False
+# Atrof-muhit o‘zgaruvchilaridan ma‘lumotlarni olish
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+ALLOWED_USER_ID = int(os.getenv('ALLOWED_USER_ID', 0))
+SCHEDULE_TIMES = json.loads(os.getenv('SCHEDULE_TIMES', '["07:00", "12:00", "19:00", "21:00"]'))
 
-# O'zbekiston vaqt mintaqasi
-UZ_TIMEZONE = pytz.timezone('Asia/Tashkent')
+# O‘zbekiston vaqt zonasi
+UZBEKISTAN_TZ = pytz.timezone('Asia/Tashkent')
 
-# Xabar yuborish vaqtlari (soat:minut)
-SEND_TIMES = [
-    (7, 0),   # 07:00
-    (12, 0),  # 12:00
-    (18, 0),  # 18:00
-    (21, 0),  # 21:00
-]
+# Xabarlar ro‘yxati va holatni saqlash uchun sinf
+class MessageQueue:
+    def __init__(self):
+        self.messages: List[str] = []
+        self.is_sending = False
+
+    def add_messages(self, messages: List[str]):
+        self.messages.extend(messages)
+
+    def get_message(self) -> str:
+        return self.messages.pop(0) if self.messages else None
+
+    def count(self) -> int:
+        return len(self.messages)
+
+message_queue = MessageQueue()
 
 async def handle_message(update, context):
-    global message_list, is_sending
     if update.effective_user.id != ALLOWED_USER_ID:
-        await update.message.reply_text("Kechirasiz, bu bot faqat ma’lum bir foydalanuvchi uchun ishlaydi.")
+        await update.message.reply_text("Kechirasiz, bu bot faqat ma‘lum bir foydalanuvchi uchun ishlaydi.")
         return
-    
+
     raw_message = update.message.text
     new_messages = re.findall(r'"([^"]*)"', raw_message)
-    
+
     if new_messages:
-        message_list.extend(new_messages)
-        await update.message.reply_text(f"{len(new_messages)} ta xabar qo‘shildi. Jami: {len(message_list)} ta xabar.")
-        if not is_sending:
-            is_sending = True
-            asyncio.create_task(send_messages_periodically(context, update.effective_user.id))
+        message_queue.add_messages(new_messages)
+        next_time = get_next_scheduled_time()
+        await update.message.reply_text(
+            f"{len(new_messages)} ta xabar qo‘shildi. Jami: {message_queue.count()} ta xabar.\n"
+            f"Keyingi xabar O‘zbekiston vaqti bilan {next_time} da yuboriladi."
+        )
+        if not message_queue.is_sending:
+            message_queue.is_sending = True
+            asyncio.create_task(send_messages_by_schedule(context, update.effective_user.id))
     else:
-        await update.message.reply_text("Xabarlar topilmadi. Qo‘shtirnoq ichida matn yuboring.")
+        await update.message.reply_text(
+            "Xabarlar topilmadi. Iltimos, qo‘shtirnoq ichida matn yuboring, masalan: \"xabar 1\" \"xabar 2\""
+        )
 
-def get_next_send_time():
-    """Keyingi yuborish vaqtini aniqlash."""
-    now = datetime.now(UZ_TIMEZONE)
+def get_next_scheduled_time() -> str:
+    """O‘zbekiston vaqti bilan keyingi jadval vaqtini qaytaradi."""
+    now = datetime.now(UZBEKISTAN_TZ)
     today = now.date()
-    next_time = None
-    min_diff = timedelta(days=1)
+    schedule_times = sorted(SCHEDULE_TIMES)
+    for t in schedule_times:
+        hour, minute = map(int, t.split(":"))
+        scheduled_time = datetime.combine(today, time(hour, minute), tzinfo=UZBEKISTAN_TZ)
+        if scheduled_time > now:
+            return t
+    # Agar bugungi vaqtlar tugagan bo‘lsa, ertangi birinchi vaqt
+    return schedule_times[0]
 
-    for hour, minute in SEND_TIMES:
-        candidate = UZ_TIMEZONE.localize(datetime(today.year, today.month, today.day, hour, minute))
-        if now > candidate:
-            # Agar vaqt o'tib ketgan bo'lsa, ertangi kunni hisoblaymiz
-            candidate = candidate + timedelta(days=1)
-        diff = candidate - now
-        if diff < min_diff:
-            min_diff = diff
-            next_time = candidate
+async def send_messages_by_schedule(context, user_id):
+    while message_queue.count() > 0:
+        try:
+            now = datetime.now(UZBEKISTAN_TZ)
+            current_time = now.strftime("%H:%M")
+            if current_time in SCHEDULE_TIMES:
+                message = message_queue.get_message()
+                if message:
+                    formatted_message = f"-{message}..."
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=formatted_message)
+                    logger.info(f"Xabar yuborildi (O‘zbekiston vaqti: {current_time}): {formatted_message}")
+                    next_time = get_next_scheduled_time()
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"Xabar yuborildi: {formatted_message}\n"
+                             f"Keyingi xabar O‘zbekiston vaqti bilan {next_time} da."
+                    )
+                await asyncio.sleep(60)  # Keyingi daqiqaga o‘tish uchun
+            await asyncio.sleep(30)  # Har 30 soniyada tekshiramiz
+        except telegram.error.TelegramError as e:
+            logger.error(f"Xabar yuborishda xato: {e}")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"Xabar yuborishda xato yuz berdi: {e}. Keyinroq qayta urinib ko‘ramiz."
+            )
+            await asyncio.sleep(60)
 
-    return next_time
-
-async def send_messages_periodically(context, user_id):
-    global message_list, is_sending
-    while message_list:
-        next_send_time = get_next_send_time()
-        now = datetime.now(UZ_TIMEZONE)
-        seconds_until_next = (next_send_time - now).total_seconds()
-
-        if seconds_until_next > 0:
-            await asyncio.sleep(seconds_until_next)
-
-        # Xabar yuborish
-        if message_list:  # Ro'yxat bo'sh emasligini tekshiramiz
-            message = message_list.pop(0)
-            formatted_message = f"-{message}..."
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=formatted_message)
-    
-    is_sending = False
-    await context.bot.send_message(chat_id=user_id, text="Xabarlar tugadi, yangisini yubor.")
+    message_queue.is_sending = False
+    await context.bot.send_message(chat_id=user_id, text="Xabarlar tugadi, yangisini yuboring.")
+    logger.info("Xabarlar ro‘yxati bo‘shadi.")
 
 def main():
+    if not all([TOKEN, CHANNEL_ID, ALLOWED_USER_ID]):
+        logger.error("TELEGRAM_TOKEN, CHANNEL_ID yoki ALLOWED_USER_ID o‘rnatilmagan!")
+        return
+
     application = Application.builder().token(TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    logger.info("Bot ishga tushdi...")
     application.run_polling()
 
 if __name__ == '__main__':

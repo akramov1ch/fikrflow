@@ -1,6 +1,9 @@
 # Python 3.11 imageni ishlatamiz
 FROM python:3.11-slim
 
+# Foydalanuvchi yaratamiz (xavfsizlik uchun)
+RUN useradd -m appuser
+
 # Ishchi direktoriyani yaratamiz
 WORKDIR /app
 
@@ -12,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Kodni konteynerga ko‘chiramiz
 COPY bot.py .
+
+# Foydalanuvchini o‘zgartiramiz
+USER appuser
 
 # Botni ishga tushiramiz
 CMD ["python", "bot.py"]
